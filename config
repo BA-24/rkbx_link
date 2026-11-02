@@ -14,7 +14,7 @@ app.yes_to_all false
 
 # == Beatkeeper ==
 # Rekordbox version to target
-keeper.rekordbox_version 7.2.2
+keeper.rekordbox_version 7.2.19
 # How often to fetch song position in Hz
 keeper.update_rate 120
 # Every nth update, perform a slow update
@@ -69,7 +69,7 @@ osc.msg.n/phrase false
 # Or send a trigger message every interval
 # Comma separated floats signify the period (0.25=every 16th, 1=every beat). Empty to disable
 osc.msg.master/beat/subdiv 4
-osc.msg.master/beat/trigger
+osc.msg.master/beat/trigger 1
 
 osc.msg.n/beat/subdiv
 osc.msg.n/beat/trigger

@@ -1,3 +1,5 @@
+> **Unofficial fork.** Modified 2026-11-02: adds Windows offsets for Rekordbox `7.2.19` (`data/offsets`), found independently with the scripts in [`tools/offset-finder`](tools/offset-finder/README.md), and sets the default config to that version. Not affiliated with or supported by the original author; for official, auto-updating offsets buy a license below.
+
 [More info/Buy](https://3gg.se/products/rkbx_link) | [Buy a License](https://store.3gg.se/)
 
 # rkbx_link for Rekordbox 
