@@ -1,4 +1,13 @@
 > **Unofficial fork.** Modified 2026-11-02: adds Windows offsets for Rekordbox `7.2.19` (`data/offsets`), found independently with the scripts in [`tools/offset-finder`](tools/offset-finder/README.md), and sets the default config to that version. Not affiliated with or supported by the original author; for official, auto-updating offsets buy a license below.
+>
+> | Windows offsets in this fork | Status |
+> |---|---|
+> | `7.2.19` | decks 1-2 verified; decks 3-4 extrapolated |
+> | `7.2.2` | from upstream (evaluation version) |
+>
+> Not sure which version you have, or is yours missing? See
+> [`tools/offset-finder`](tools/offset-finder/README.md): `python rbfind.py version` and `check`
+> test your setup, and `new` + `confirm` find offsets for a new release in about 10 minutes.
 
 [More info/Buy](https://3gg.se/products/rkbx_link) | [Buy a License](https://store.3gg.se/)
 

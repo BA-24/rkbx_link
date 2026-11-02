@@ -1,50 +1,99 @@
 # offset-finder
 
-Python scripts used to find the Windows memory offsets for a new Rekordbox
-version (used for 7.2.19). They only read Rekordbox's memory (`ReadProcessMemory`), never write to it.
+Tools for checking rkbx_link offsets and for finding them for a new Rekordbox
+release. They only read Rekordbox's memory (`ReadProcessMemory`), never write to it.
 
-Run them with **Windows** Python (`python.exe`) while Rekordbox is open in
-Performance mode. `heapscan.py` and everything built on it needs numpy:
+## Setup (once)
+
+Install [Python 3](https://www.python.org/downloads/) for **Windows**. Then,
+from the repo root, install numpy into a local folder (nothing is installed
+system-wide):
 
 ```
 python -m pip install --target tools/pylib numpy
 ```
 
+Run every command below from `tools/offset-finder` while Rekordbox is open in
+**Performance** mode.
+
+## Is my version supported?
+
+```
+python rbfind.py version     # which Rekordbox is running, and whether data/offsets has it
+python rbfind.py check       # live-check every field against Rekordbox
+```
+
+`check` works best with a different track on each deck and one deck playing.
+It cross-checks the BPM against the track's own beat grid (from its ANLZ file).
+A full pass looks like this:
+
+```
+  [ok] master deck          deck 1
+ deck 1:
+  [ok] ANLZ path            C:/Users/.../ANLZ0000.DAT
+  [ok] sample position      54962623 (1246.3s)
+  [ok] playback rate        44218 samples/s
+  [ok] BPM                  175.00 (grid 175.00, pitch +0.00%)
+  [ok] track info           'S3RL Penultimately Presents'
+```
+
+## Adding a new Rekordbox version
+
+The whole process takes about 10 minutes and a few clicks in Rekordbox.
+
+1. Load **different** tracks on deck 1 and deck 2, keep the tempo/pitch at
+   **0%**, start deck 1 **playing** and leave deck 2 paused.
+2. `python rbfind.py new`
+   - It finds the ANLZ path, BPM and sample position on its own, starting from
+     the chain shapes of the closest known version (seconds).
+   - It finds track info by walking back from the `Track Title:` strings in
+     memory (a few minutes). This gives hundreds of candidates.
+   - For the master deck index, it asks you to click **MASTER** on deck 1 or 2
+     a few times.
+3. Quit and restart Rekordbox, load two other tracks on decks 1 and 2, then
+   run `python rbfind.py confirm`. The restart removes the candidate chains
+   that only worked by chance. You'll be asked to toggle MASTER twice more.
+   `confirm` then prints the new block, appends it to `data/offsets` if you
+   agree, and runs `check`.
+4. Set `keeper.rekordbox_version` in `config`, test with rkbx_link, and commit
+   `data/offsets`.
+
+Progress is saved in `work/<version>/state.json`, so a step can be re-run on
+its own. For example, `new --skip-track` reuses the track candidates and only
+redoes the other steps.
+
+To check that output reaches you, run rkbx_link with OSC enabled and
+`python oscmon.py 20`. It shows every beat trigger, the last value per OSC
+address, and the measured BPM.
+
 ## Offsets format
 
 Each pointer line is `G o1 .. on F`: read the qword at `rekordbox.exe base + G`,
-then repeatedly at `previous + o`, then add `F`. Per version: master deck index
-(u8), then for each deck BPM (f32), sample position (i64, at 44.1 kHz), track
-info string (`Track Title: ..\nArtist: ..\nAlbum: ..`) and ANLZ path string.
+then at `previous + o` for each offset, then add `F`. Per version there is a
+master deck index line (u8), then for each deck four lines: BPM (f32), sample
+position (i64, in 44.1 kHz samples), track info string
+(`Track Title: ..\nArtist: ..\nAlbum: ..`) and ANLZ path string. Decks are
+8 bytes apart in some array along each chain.
 
-## Procedure
+How the chains changed between the two versions in `data/offsets`:
 
-1. **Same shape, new global.** Load tracks on decks 1-2, then run
-   `rbscan.py 2`. It keeps the previous version's chain shapes and searches the
-   module's writable sections for the new global offset. For 7.2.19 this found
-   the ANLZ chain directly.
-2. **BPM / sample position.** Play deck 1, pause deck 2, then run
-   `playfilter.py <deck1 bpm>`. It keeps only BPM floats that have a sample
-   counter advancing at about 44.1 kHz nearby (sample position was BPM - 0x70).
-   Then run `bpmchains.py <deck2 bpm> <hit addrs..>` and look for a chain pair
-   differing by a deck stride of 8. Check the result with `verify.py`
-   (edit the chain in its `__main__`).
-3. **Track info.** Find the strings with `findstr.py "Track Title: "`, then run
-   `pairwalk.py <deck1 addr> <deck2 addr> > track_candidates.txt`. Restart
-   Rekordbox, load *different* tracks, and run
-   `filtertrack.py track_candidates.txt track_pass2.txt`. The deck stride is the
-   4th-from-last offset.
-4. **Master deck index.** This step needs `track_pass2.txt`, since it searches
-   below those globals. With deck 2 as master, run `master2.py init 1`. Toggle
-   master and run `master2.py filter 0`, toggle back and run `master2.py filter 1`,
-   and repeat until a few candidates remain.
-5. Add the block to `data/offsets` and set `keeper.rekordbox_version`. To check
-   the output, use `osclisten.py 20` (beat trigger timing) or `oscdump.py 8`
-   (last value per OSC address).
+| field | 7.2.2 | 7.2.19 |
+|---|---|---|
+| BPM | `0564B038 0 2B0 1A0` | `05E09790 0 2C0 1A0` |
+| position | BPM chain, final `130` | BPM chain, final `130` |
+| ANLZ | `057696B8 8 3F0 0` | `05F53DA8 8 3F0 0` |
+| track info | `05737C48 20 410 80 168 F0 0` | `061A82C0 3A0 478 340 CB0 100 0` |
+| master | `05737C48 20 278 124` | `061A82C0 5A0 C94` |
 
-## 7.2.19 notes
+BPM, position and ANLZ keep their shape, so `new` finds them on its own. Track
+info and master change shape, which is why those two steps search more widely
+and need the restart.
 
-- Decks 1-2 were verified across a restart. Decks 3-4 are extrapolated by the
-  stride and untested.
-- Master index had three equivalent candidates rooted at `061A82C0`
-  (`5A0 C94`, `5A8 A04`, `620 774`). `5A0 C94` is used.
+## Modules
+
+- `rbfind.py`: the command-line tool above
+- `rbmem.py`: process access, memory reads, version detection, chain resolution
+- `scan.py`: search strategies (shape search, deck-pair back-walk, master toggles)
+- `anlz.py`: ANLZ beat grid reader
+- `offsets_file.py`: reads and writes `data/offsets`
+- `oscmon.py`: OSC output monitor
