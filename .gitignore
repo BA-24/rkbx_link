@@ -6,3 +6,9 @@ current_track.txt
 setlist.txt
 rkbx_link.exe
 rkbx_link.zip
+
+# offset-finder working files
+/tools/pylib
+/tools/offset-finder/*.txt
+/tools/offset-finder/*.json
+/tools/offset-finder/*.pkl
