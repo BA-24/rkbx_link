@@ -2,7 +2,7 @@
 >
 > | Windows offsets in this fork | Status |
 > |---|---|
-> | `7.2.19` | decks 1-2 verified; decks 3-4 extrapolated |
+> | `7.2.19` | decks 1-2 verified across 5 restarts (beats, BPM, master); track titles empty (placeholder); decks 3-4 extrapolated |
 > | `7.2.2` | from upstream (evaluation version) |
 >
 > Not sure which version you have, or is yours missing? See

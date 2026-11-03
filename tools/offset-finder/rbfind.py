@@ -69,8 +69,7 @@ def read_decks(rb, block, decks):
             "bpm": rb.value(d["bpm"], "f"),
             "pos": rb.value(d["pos"], "q"),
             "anlz": path.decode(errors="replace") if path else None,
-            "title": track.split(b"\n")[0][len(TITLE):].decode(errors="replace")
-            if track and track.startswith(TITLE) else None,
+            "title": title_of(track),
         })
     return out
 
@@ -138,7 +137,10 @@ def check_block(rb, block, decks):
             note += f" (grid {grid_bpm:.2f}, pitch {100 * (bpm / grid_bpm - 1):+.2f}%)"
             bpm_ok = abs(bpm / grid_bpm - 1) < 0.5
         report("BPM", bpm_ok, note)
-        report("track info", x["title"] is not None, repr(x["title"]))
+        if block["decks"][k]["track"] == block["decks"][k]["anlz"]:
+            print(f"  [--] {'track info':<20} placeholder (no stable chain known; titles are empty)")
+        else:
+            report("track info", x["title"] is not None, repr(x["title"]))
     if decks >= 2 and all(d["anlz"] for d in a) and len({d["anlz"] for d in a}) < decks:
         print("  note: decks share the same ANLZ path - load different tracks for a meaningful check")
     print("PASS" if good else "FAIL")
@@ -247,17 +249,69 @@ def find_pos(rb, priors, decks, bpm_chain, lengths):
     return [(base + [f], playing) for _, playing, f in best]
 
 
-def find_track(rb, decks):
-    hits = [a for a in rb.find_bytes(TITLE)]
-    print(f"  {len(hits)} 'Track Title:' strings in memory; walking back to static memory (takes a few minutes) ...")
-    res = scan.deck_pair_walk(rb, hits, log=lambda m: print(m, flush=True))
-    good = []
-    for chain, di in res:
-        titles = [rb.cstr(scan.deck_chain(chain, di, k), 200) for k in range(decks)]
-        if all(t and t.startswith(TITLE) for t in titles) and len(set(titles)) == decks:
-            good.append((chain, di))
-    good.sort(key=lambda x: (len(x[0]), x[0]))
+def title_of(raw):
+    """'Track Title: X\nArtist: ..' -> 'X', else None."""
+    if not raw or not raw.startswith(TITLE):
+        return None
+    return raw.split(b"\n")[0][len(TITLE):].decode(errors="replace")
+
+
+def ask_titles(args, decks):
+    """Ask the user for (part of) each deck's title; '' means don't check."""
+    return [ask(args, f"Type the track title shown on deck {k + 1} (part of it is enough).").lower()
+            for k in range(decks)]
+
+
+def track_matches(rb, chain, di, titles):
+    got = [title_of(rb.cstr(scan.deck_chain(chain, di, k), 200)) for k in range(len(titles))]
+    if any(g is None for g in got) or len(set(got)) < len(got):
+        return False
+    return all(t in g.lower() for t, g in zip(titles, got))
+
+
+def find_track(rb, decks, titles, roots):
+    """Track info chains, deck offset at index di: [(chain, di)]."""
+    # titles are lower-cased for matching, so search for every title string
+    # and keep the ones that contain a typed title
+    hits = []
+    for a in rb.find_bytes(TITLE):
+        t = title_of(rb.read(a, 300).split(b"\0")[0] if rb.read(a, 300) else None)
+        if t and (not all(titles) or any(x in t.lower() for x in titles)):
+            hits.append(a)
+    found = {}
+    print(f"  a) from the master/BPM/ANLZ objects ({len(hits)} title strings) ...", flush=True)
+    for c in scan.meet_in_middle(rb, roots, hits):
+        for di in range(1, len(c) - 1):
+            if track_matches(rb, c, di, titles):
+                found[tuple(c)] = di
+    print(f"     {len(found)} chains")
+    print("  b) walking back from the title strings to static memory (a few minutes) ...", flush=True)
+    for chain, di in scan.deck_pair_walk(rb, hits, log=lambda m: print(m, flush=True)):
+        if track_matches(rb, chain, di, titles):
+            found.setdefault(tuple(chain), di)
+    good = sorted(([list(c), di] for c, di in found.items()), key=lambda x: (len(x[0]), x[0]))
     return good
+
+
+def placeholder_track(st, k):
+    """No stable track chain: reuse the ANLZ path chain so rkbx_link's reads
+    succeed (it drops the connection when any chain fails to read)."""
+    return scan.deck_chain(st["anlz"], 1, k)
+
+
+def search_roots(rb, st):
+    """Objects along the BPM, ANLZ and master chains, as forward-search roots."""
+    roots, seen = [], set()
+    chains = [st["bpm"][:-1], st["anlz"][:-1]] + [c[:-1] for c in st.get("master_cands", [])[:20]]
+    for c in chains:
+        for n in range(1, len(c) + 1):
+            pre = list(c[:n])
+            a = rb.resolve(pre + [0])
+            obj = rb.u64(a) if a is not None else None
+            if obj and (obj, len(pre)) not in seen:
+                seen.add((obj, len(pre)))
+                roots.append((obj, pre))
+    return roots
 
 
 def cmd_new(args):
@@ -270,7 +324,7 @@ def cmd_new(args):
     priors = prior_blocks(args, blocks, version)
     print(f"Rekordbox {rb.version}: searching offsets using shapes from {', '.join(v for v, _ in priors)}")
     st = load_state(version)
-    st.update({"version": version, "decks": args.decks})
+    st.update({"version": version, "decks": args.decks, "process": rb.process_key(), "restarts": 0})
 
     ask(args, "In Rekordbox (Performance mode): load DIFFERENT tracks on deck 1 and deck 2, "
               "keep pitch/tempo at 0%, start deck 1 playing and leave deck 2 paused.")
@@ -304,49 +358,100 @@ def cmd_new(args):
     print(f"    using {scan.chain_str(st['pos'])}")
     save_state(version, st)
 
-    print("\n[4/5] track info")
+    print("\n[4/5] master deck index")
+    if args.skip_master and "master_cands" in st:
+        print("  (reusing earlier candidates)")
+    else:
+        st["master_cands"] = master_search(args, rb, st)
+        save_state(version, st)
+    if not st["master_cands"]:
+        sys.exit("  no master chains found")
+
+    print("\n[5/5] track info")
     if args.skip_track and "track_cands" in st:
         print("  (reusing earlier candidates)")
     else:
-        st["track_cands"] = find_track(rb, args.decks)
+        titles = ask_titles(args, args.decks)
+        st["track_cands"] = find_track(rb, args.decks, titles, search_roots(rb, st))
         save_state(version, st)
-    print(f"  {len(st['track_cands'])} candidate chains (a Rekordbox restart in `confirm` removes the false ones)")
+    print(f"  {len(st['track_cands'])} candidate chains")
     if not st["track_cands"]:
-        sys.exit("  no track info chains found - see README (manual steps)")
-
-    print("\n[5/5] master deck index")
-    if args.skip_master:
-        print("  skipped (--skip-master)")
-    else:
-        st["master_cands"] = master_search(args, rb, st)
+        print("  none found; rkbx_link will get a placeholder (empty track titles, everything else works)")
     save_state(version, st)
-    print("\nNext: quit and restart Rekordbox, load two different tracks, then run:  python rbfind.py confirm")
+    print("\nNext: quit and restart Rekordbox, load two other tracks, then run:  python rbfind.py confirm")
 
 
-def master_search(args, rb, st, cands=None, rounds=4):
-    """Toggle MASTER between decks until few candidates remain; returns chains."""
-    roots = {st["bpm"][0], st["anlz"][0]} | {c[0][0] for c in st["track_cands"]}
+def toggle_filter(args, rb, cands, rounds, read):
+    """Ask for the current master, then toggle `rounds` times; keep chains whose
+    byte follows. `cands` is a list of chains, `read(chain)` reads one."""
     ans = ask(args, "Which deck is MASTER right now? (1 or 2)")
     cur = int(ans) - 1 if ans in ("1", "2") else 0
-    if cands is None:
-        print("  snapshotting memory ...")
-        cands = scan.master_candidates(rb, roots, cur)
-    else:
-        cands = scan.master_filter(rb, scan.master_from_chains(cands), cur)
-    print(f"  {scan.master_count(cands)} candidates")
+    cands = [c for c in cands if read(c) == cur]
+    print(f"  {len(cands)} candidates")
     for _ in range(rounds):
-        if scan.master_count(cands) <= 3:
+        cur = 1 - cur
+        ask(args, f"Click MASTER on deck {cur + 1}.")
+        cands = [c for c in cands if read(c) == cur]
+        print(f"  {len(cands)} candidates")
+    return cands
+
+
+def master_search(args, rb, st, rounds=7):
+    """Find the master byte by toggling MASTER, then every static chain to it."""
+    ans = ask(args, "Which deck is MASTER right now? (1 or 2)")
+    cur = int(ans) - 1 if ans in ("1", "2") else 0
+    print("  checksumming memory pages ...", flush=True)
+    before = scan.page_sums(rb)
+    cur = 1 - cur
+    ask(args, f"Click MASTER on deck {cur + 1}.")
+    pages = scan.changed_pages(rb, before)
+    cands = scan.bytes_equal(pages, cur)
+    print(f"  {len(pages)} pages changed, {scan.bytes_count(cands)} candidate bytes")
+    for i in range(rounds):
+        if i >= 3 and scan.bytes_count(cands) <= 3:
             break
         cur = 1 - cur
         ask(args, f"Click MASTER on deck {cur + 1}.")
-        cands = scan.master_filter(rb, cands, cur)
-        print(f"  {scan.master_count(cands)} candidates")
-    if not scan.master_count(cands):
-        print("  no candidates left - did each MASTER click register? Retry with:  python rbfind.py new --skip-track")
-    return scan.master_chains(cands)[:1000]
+        cands = scan.bytes_filter(rb, cands, cur)
+        print(f"  {scan.bytes_count(cands)} candidates")
+    addrs = sorted(a + int(o) for a, idx in cands.items() for o in idx)
+    if not addrs:
+        print("  no candidates left - did each MASTER click register? Retry with:  python rbfind.py new")
+        return []
+    if len(addrs) > 500:
+        print(f"  {len(addrs)} candidate bytes left; keeping the first 500")
+        addrs = addrs[:500]
+    # walk back to every static chain that reaches these bytes; restarts in
+    # `confirm` then remove the ones that go through objects that move
+    print(f"  {len(addrs)} address(es); walking back to static memory ...", flush=True)
+    chains = scan.back_to_static(rb, addrs, max_depth=4, maxoff=[0x800, 0x400, 0x400, 0x400],
+                                 node_cap=3_000_000, per_node=2, log=lambda m: print(m, flush=True))
+    chains = toggle_filter(args, rb, chains, 2, lambda c: rb.value(c, "B"))
+    return chains[:20000]
+
+
+def rank_master(chains, st, priors):
+    """Best master chain first. A byte inside one deck's own object (reached via
+    the BPM/ANLZ deck arrays) is a per-deck 'is master' flag: it follows MASTER
+    with 2 decks but not with 4, so those go last. Otherwise prefer the shape
+    of known versions' master chains (same final offset, same first offset),
+    then shorter chains."""
+    deck_arrays = {(st["bpm"][0], st["bpm"][1] + 8 * k) for k in range(4)} | \
+                  {(st["anlz"][0], st["anlz"][1] + 8 * k) for k in range(4)}
+    prior = [b["master"] for b in priors]
+
+    def score(c):
+        per_deck = len(c) > 2 and (c[0], c[1]) in deck_arrays
+        same_final = any(c[-1] == p[-1] for p in prior)
+        same_first = any(len(c) > 2 and len(p) > 2 and c[1] == p[1] for p in prior)
+        return (per_deck, not same_final, not same_first, len(c), c)
+    return sorted(chains, key=score)
 
 
 # -- confirm --------------------------------------------------------------------------
+
+RESTARTS_NEEDED = 2
+
 
 def cmd_confirm(args):
     rb = Rekordbox()
@@ -355,41 +460,49 @@ def cmd_confirm(args):
     if not st:
         sys.exit(f"No saved search for {version}; run `rbfind.py new` first")
     decks = st["decks"]
-    ask(args, "After restarting Rekordbox: load two DIFFERENT tracks than before on deck 1 and 2.")
+    if rb.process_key() == st.get("process"):
+        sys.exit("  Rekordbox has not been restarted since the last step - quit it, start it again, load tracks, then rerun")
+    ask(args, "Load two DIFFERENT tracks than before on deck 1 and 2.")
 
     for key in ("anlz", "bpm", "pos"):
         print(f"  {key}: {scan.chain_str(st[key])}")
     paths = [_deck_str(rb, st["anlz"], 1, k) for k in range(decks)]
     if not all(anlz_ok(p) for p in paths):
-        sys.exit("  ANLZ chain broke after restart - rerun `rbfind.py new`")
+        sys.exit("  ANLZ chain broke after restart (or a deck is empty) - load tracks, or rerun `rbfind.py new`")
 
-    tc = [(c, di) for c, di in st["track_cands"]
-          if all((t := rb.cstr(scan.deck_chain(c, di, k), 200)) and t.startswith(TITLE) for k in range(decks))
-          and len({rb.cstr(scan.deck_chain(c, di, k), 200) for k in range(decks)}) == decks]
-    print(f"  track info: {len(tc)} of {len(st['track_cands'])} candidates survived the restart")
-    if not tc:
-        sys.exit("  no track chain survived - rerun `rbfind.py new`")
-
-    if args.skip_master or not st.get("master_cands"):
-        sys.exit("  master deck candidates missing - run `rbfind.py new` without --skip-master")
-    mc = master_search(args, rb, st, cands=st["master_cands"], rounds=2)
-    print(f"  master deck: {len(mc)} candidates survived")
+    mc = toggle_filter(args, rb, st["master_cands"], 3, lambda c: rb.value(c, "B"))
+    print(f"  master deck: {len(mc)} of {len(st['master_cands'])} candidates survived")
     if not mc:
         sys.exit("  no master chain survived - rerun `rbfind.py new`")
 
-    track, di = tc[0]
+    titles = ask_titles(args, decks)
+    tc = [(c, di) for c, di in st["track_cands"] if track_matches(rb, c, di, titles)]
+    print(f"  track info: {len(tc)} of {len(st['track_cands'])} candidates survived")
+
+    st.update({"master_cands": mc, "track_cands": tc, "process": rb.process_key(),
+               "restarts": st.get("restarts", 0) + 1})
+    save_state(version, st)
+    if st["restarts"] < RESTARTS_NEEDED:
+        print(f"\nRestart {st['restarts']} of {RESTARTS_NEEDED} done. Chains that look fine after one restart "
+              "can still break on the next, so: quit and restart Rekordbox again, load two other tracks, "
+              "and run `rbfind.py confirm` once more.")
+        return
+
+    mc = rank_master(mc, st, [b for _, b in prior_blocks(args, of.load(), version)])
     deck_list = []
     for k in range(decks):
         deck_list.append({
             "bpm": scan.deck_chain(st["bpm"], 1, k),
             "pos": scan.deck_chain(st["pos"], 1, k),
-            "track": scan.deck_chain(track, di, k),
+            "track": scan.deck_chain(tc[0][0], tc[0][1], k) if tc else placeholder_track(st, k),
             "anlz": scan.deck_chain(st["anlz"], 1, k),
         })
     deck_list = of.stride_extrapolate(deck_list, 4)
     comment = (f"{version} (Windows): found with tools/offset-finder/rbfind.py on {datetime.date.today()}.\n"
-               f"Decks 1-{decks} verified across a restart; decks {decks + 1}-4 extrapolated (untested).\n"
+               f"Decks 1-{decks} verified across {st['restarts']} restarts; decks {decks + 1}-4 extrapolated (untested).\n"
                f"Other master candidates: {'; '.join(fmt_chain(c) for c in mc[1:4]) or 'none'}")
+    if not tc:
+        comment += "\nTrack info: no stable chain found; placeholder (ANLZ path chain), titles will be empty."
     block = of.format_block(version, mc[0], deck_list, comment)
     print("\n" + block)
     blocks = of.load()
@@ -416,8 +529,8 @@ def main():
         p.add_argument("--yes", action="store_true", help="don't wait for prompts (testing)")
         p.add_argument("--skip-master", action="store_true")
         p.add_argument("--as-version", help="treat the running Rekordbox as this version (testing)")
+        p.add_argument("--prior", help="only use this known version's shapes")
         if name == "new":
-            p.add_argument("--prior", help="only use this known version's shapes")
             p.add_argument("--skip-track", action="store_true", help="reuse saved track candidates")
         else:
             p.add_argument("--dry-run", action="store_true", help="print the block, don't write it")

@@ -82,6 +82,12 @@ class Rekordbox:
         k32.CloseHandle(snap)
         sys.exit("rekordbox.exe module not found")
 
+    def process_key(self):
+        """'pid:creation time' - changes when Rekordbox is restarted."""
+        t = [wt.FILETIME() for _ in range(4)]
+        k32.GetProcessTimes(self.h, *[ctypes.byref(x) for x in t])
+        return f"{self.pid}:{t[0].dwHighDateTime:08x}{t[0].dwLowDateTime:08x}"
+
     # -- raw reads --------------------------------------------------------
     def read(self, addr, n):
         buf = ctypes.create_string_buffer(n)

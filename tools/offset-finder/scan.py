@@ -226,3 +226,150 @@ def master_from_chains(chains):
     if () in out:
         out[("static", 0)] = out.pop(())
     return {k: np.array(sorted(v), dtype=np.uint32) for k, v in out.items()}
+
+
+# -- 4. generic back-walk to static memory ------------------------------------------
+
+def back_to_static(rb, targets, max_depth=5, maxoff=0x1000, node_cap=300_000, per_node=4, log=print):
+    """Every chain [G, o1, .., F] (G a module offset) that resolves to one of
+    `targets`, up to max_depth pointer levels. Found by walking back from the
+    targets; the frontier stops growing once it passes node_cap. `maxoff` is
+    the largest offset per level, either one number or a list (final offset
+    first)."""
+    offs = maxoff if isinstance(maxoff, (list, tuple)) else [maxoff]
+    cur = {t: [[]] for t in targets}
+    chains = {}
+    for depth in range(1, max_depth + 1):
+        new = {}
+        for loc, t, off in back_step(rb, cur, offs[min(depth - 1, len(offs) - 1)]):
+            for s in cur[t][:per_node]:
+                new.setdefault(loc, []).append([off] + s)
+        for loc, ss in new.items():
+            if rb.is_static(loc):
+                for s in ss:
+                    c = [loc - rb.base] + s
+                    chains[tuple(c)] = c
+        cur = {k: v for k, v in new.items() if not rb.is_static(k)}
+        log(f"    depth {depth}: {len(new)} nodes, {len(chains)} static chains")
+        if not cur or len(cur) > node_cap:
+            break
+    return sorted(chains.values(), key=lambda c: (len(c), c))
+
+
+# -- 5. forward search from known objects to per-deck strings -----------------------
+
+def forward_objects(rb, roots, hops=3, block=0x1000):
+    """Objects reachable from roots [(addr, chain prefix)] in up to `hops`
+    pointer reads; each object once, with the first prefix that reached it."""
+    import numpy as np
+
+    out = list(roots)
+    frontier = list(roots)
+    seen = {a for a, _ in roots}
+    for _ in range(hops):
+        nxt = []
+        for a, pre in frontier:
+            b = rb.read(a, block)
+            if not b:
+                continue
+            v = np.frombuffer(b[: len(b) // 8 * 8], dtype="<u8")
+            for o in np.nonzero((v >= 0x10000) & (v < 0x7FFFFFFFFFFF))[0]:
+                q = int(v[o])
+                if q not in seen:
+                    seen.add(q)
+                    nxt.append((q, pre + [int(o) * 8]))
+        out += nxt
+        frontier = nxt
+    return out
+
+
+def meet_in_middle(rb, roots, targets, fwd_hops=3, back_depth=2, maxoff=0x1000):
+    """Chains from the root objects to the targets: forward from roots, back
+    from targets, joined where a forward object holds a backward location."""
+    import numpy as np
+
+    cur = {t: [[]] for t in targets}
+    back = {}
+    for _ in range(back_depth):
+        new = {}
+        for loc, t, off in back_step(rb, cur, maxoff):
+            for s in cur[t][:3]:
+                new.setdefault(loc, []).append([off] + s)
+        cur = new
+        for loc, ss in new.items():
+            back.setdefault(loc, []).extend(ss)
+    locs = np.array(sorted(back), dtype=np.uint64)
+    hits = {}
+    for a, pre in forward_objects(rb, roots, fwd_hops):
+        lo = np.searchsorted(locs, np.uint64(a))
+        hi = np.searchsorted(locs, np.uint64(a + maxoff))
+        for i in range(lo, hi):
+            loc = int(locs[i])
+            for s in back[loc][:3]:
+                c = pre + [loc - a] + s
+                hits[tuple(c)] = c
+    return list(hits.values())
+
+
+
+# -- 6. master byte by page diffing --------------------------------------------------
+
+PAGE = 0x1000
+
+
+def page_sums(rb):
+    """{page address: checksum} over all scannable memory (cheap to keep)."""
+    import numpy as np
+
+    out = {}
+    for addr, b in rb.blocks():
+        n = len(b) // PAGE
+        v = np.frombuffer(b[: n * PAGE], dtype="<u8").reshape(n, PAGE // 8)
+        s = v.sum(axis=1, dtype=np.uint64) ^ (v[:, ::7].sum(axis=1, dtype=np.uint64) << np.uint64(1))
+        for i in range(n):
+            out[addr + i * PAGE] = int(s[i])
+    return out
+
+
+def changed_pages(rb, before):
+    """Pages whose checksum differs from `before`, with their current bytes."""
+    import numpy as np
+
+    out = {}
+    for addr, b in rb.blocks():
+        n = len(b) // PAGE
+        v = np.frombuffer(b[: n * PAGE], dtype="<u8").reshape(n, PAGE // 8)
+        s = v.sum(axis=1, dtype=np.uint64) ^ (v[:, ::7].sum(axis=1, dtype=np.uint64) << np.uint64(1))
+        for i in np.nonzero(s != np.array([before.get(addr + j * PAGE, -1) & 0xFFFFFFFFFFFFFFFF
+                                            for j in range(n)], dtype=np.uint64))[0]:
+            out[addr + int(i) * PAGE] = b[int(i) * PAGE:(int(i) + 1) * PAGE]
+    return out
+
+
+def bytes_equal(pages, want):
+    """{page: offsets} where the byte equals want."""
+    import numpy as np
+
+    out = {}
+    for a, b in pages.items():
+        idx = np.flatnonzero(np.frombuffer(b, dtype=np.uint8) == want)
+        if len(idx):
+            out[a] = idx
+    return out
+
+
+def bytes_filter(rb, cands, want):
+    import numpy as np
+
+    out = {}
+    for a, idx in cands.items():
+        b = rb.read(a, PAGE)
+        if b:
+            keep = idx[np.frombuffer(b, dtype=np.uint8)[idx] == want]
+            if len(keep):
+                out[a] = keep
+    return out
+
+
+def bytes_count(cands):
+    return sum(len(v) for v in cands.values())

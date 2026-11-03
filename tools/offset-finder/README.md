@@ -39,28 +39,51 @@ A full pass looks like this:
 
 ## Adding a new Rekordbox version
 
-The whole process takes about 10 minutes and a few clicks in Rekordbox.
+The whole process takes about 20 minutes, with a few clicks in Rekordbox and
+two restarts.
 
 1. Load **different** tracks on deck 1 and deck 2, keep the tempo/pitch at
    **0%**, start deck 1 **playing** and leave deck 2 paused.
 2. `python rbfind.py new`
    - It finds the ANLZ path, BPM and sample position on its own, starting from
      the chain shapes of the closest known version (seconds).
-   - It finds track info by walking back from the `Track Title:` strings in
-     memory (a few minutes). This gives hundreds of candidates.
-   - For the master deck index, it asks you to click **MASTER** on deck 1 or 2
-     a few times.
-3. Quit and restart Rekordbox, load two other tracks on decks 1 and 2, then
-   run `python rbfind.py confirm`. The restart removes the candidate chains
-   that only worked by chance. You'll be asked to toggle MASTER twice more.
-   `confirm` then prints the new block, appends it to `data/offsets` if you
-   agree, and runs `check`.
-4. Set `keeper.rekordbox_version` in `config`, test with rkbx_link, and commit
+   - For the master deck index, it asks you to click **MASTER** on deck 1 or
+     2 about ten times. It then collects every pointer chain that reaches the
+     master byte (about 2 minutes).
+   - For track info, it asks you to type the titles on deck 1 and 2, then
+     searches for chains to them (about 5 minutes).
+3. Quit and restart Rekordbox, load two **other** tracks on decks 1 and 2,
+   and run `python rbfind.py confirm`. Each restart removes chains that only
+   worked by chance, because they went through objects that Rekordbox
+   allocates somewhere else each run. It asks for a few MASTER clicks and the
+   new titles again.
+4. Do step 3 a second time. A chain can survive one restart and still break
+   on the next, so `confirm` only prints the new block after two restarts.
+   It appends the block to `data/offsets` if you agree, and runs `check`.
+5. Set `keeper.rekordbox_version` in `config`, test with rkbx_link, and commit
    `data/offsets`.
 
-Progress is saved in `work/<version>/state.json`, so a step can be re-run on
-its own. For example, `new --skip-track` reuses the track candidates and only
-redoes the other steps.
+`confirm` checks that Rekordbox was really restarted (by its process start
+time) and refuses to run otherwise.
+
+Progress is saved in `work/<version>/state.json`. `new --skip-master` or
+`new --skip-track` reuses that step's saved candidates.
+
+### Things to know
+
+- **Track info may get a placeholder.** In 7.2.19 no track info chain
+  survived two restarts. The per-deck title strings seem to live in UI
+  objects that are rebuilt each run. When nothing survives, `confirm` writes
+  the ANLZ path chain on the track info lines. rkbx_link drops its connection
+  whenever any chain fails to read, so a broken track chain would stop all
+  output, beats included. With the placeholder, the reads succeed and track
+  titles are just empty. `check` shows this as `[--] placeholder`.
+- **Master chain choice.** Several chains usually survive. `confirm` prefers
+  the one shaped like the previous version's master chain. It avoids bytes
+  inside one deck's own object: such a byte is a per-deck "is master" flag,
+  which matches the index with 2 decks but not with 4.
+- **Decks 3 and 4** are extrapolated from the deck 1 to deck 2 difference
+  and are untested unless you run in 4-deck mode.
 
 To check that output reaches you, run rkbx_link with OSC enabled and
 `python oscmon.py 20`. It shows every beat trigger, the last value per OSC
@@ -82,18 +105,18 @@ How the chains changed between the two versions in `data/offsets`:
 | BPM | `0564B038 0 2B0 1A0` | `05E09790 0 2C0 1A0` |
 | position | BPM chain, final `130` | BPM chain, final `130` |
 | ANLZ | `057696B8 8 3F0 0` | `05F53DA8 8 3F0 0` |
-| track info | `05737C48 20 410 80 168 F0 0` | `061A82C0 3A0 478 340 CB0 100 0` |
-| master | `05737C48 20 278 124` | `061A82C0 5A0 C94` |
+| track info | `05737C48 20 410 80 168 F0 0` | placeholder (none stable) |
+| master | `05737C48 20 278 124` | `05F19B48 20 0 280 124` |
 
-BPM, position and ANLZ keep their shape, so `new` finds them on its own. Track
-info and master change shape, which is why those two steps search more widely
-and need the restart.
+BPM, position and ANLZ keep their shape, so `new` finds them on its own.
+Master kept most of its shape but gained a level. That's why the master and
+track steps search all of memory and rely on restarts to weed out chains.
 
 ## Modules
 
 - `rbfind.py`: the command-line tool above
 - `rbmem.py`: process access, memory reads, version detection, chain resolution
-- `scan.py`: search strategies (shape search, deck-pair back-walk, master toggles)
+- `scan.py`: search strategies (shape search, back-walks to static memory, page-diff master search, forward/back meet-in-the-middle)
 - `anlz.py`: ANLZ beat grid reader
 - `offsets_file.py`: reads and writes `data/offsets`
 - `oscmon.py`: OSC output monitor
