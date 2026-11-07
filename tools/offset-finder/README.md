@@ -98,6 +98,13 @@ position (i64, in 44.1 kHz samples), track info string
 (`Track Title: ..\nArtist: ..\nAlbum: ..`) and ANLZ path string. Decks are
 8 bytes apart in some array along each chain.
 
+This fork also reads an optional `#uuid <chain>` line after a deck's ANLZ line:
+the loaded track's UUID. When the ANLZ path is empty (Rekordbox leaves it
+empty for tracks it analyses while loading), rkbx_link finds the grid file
+through the UUID instead. Other rkbx_link builds read the line as a comment.
+`rbfind` doesn't find this chain yet; [INTERNALS.md](INTERNALS.md) explains how
+to find it by hand.
+
 How the chains changed between the two versions in `data/offsets`:
 
 | field | 7.2.2 | 7.2.19 |
@@ -112,6 +119,13 @@ BPM, position and ANLZ keep their shape, so `new` finds them on its own.
 Master kept most of its shape but gained a level. That's why the master and
 track steps search all of memory and rely on restarts to weed out chains.
 
+## When beats go wrong
+
+[INTERNALS.md](INTERNALS.md) describes how Rekordbox 7.2.19 stores the deck
+data, the failures found so far (off-beat pulses after loading a new track, no
+beats while MASTER sits on a stopped deck), how they were tracked down, and
+ideas not tried yet. Start there.
+
 ## Modules
 
 - `rbfind.py`: the command-line tool above
@@ -120,3 +134,4 @@ track steps search all of memory and rely on restarts to weed out chains.
 - `anlz.py`: ANLZ beat grid reader
 - `offsets_file.py`: reads and writes `data/offsets`
 - `oscmon.py`: OSC output monitor
+- `decks.py`: live per-deck view (playing, path, UUID) for debugging; see [INTERNALS.md](INTERNALS.md)

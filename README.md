@@ -5,6 +5,13 @@
 > | `7.2.19` | decks 1-2 verified across 5 restarts (beats, BPM, master); track titles empty (placeholder); decks 3-4 extrapolated |
 > | `7.2.2` | from upstream (evaluation version) |
 >
+> Fixes in this fork (see [`INTERNALS.md`](tools/offset-finder/INTERNALS.md)):
+> - Tracks that Rekordbox analyses while loading them no longer leave rkbx_link
+>   on the previous track's beat grid (which gave steady but off-beat pulses).
+>   It finds their grid file by the track's UUID instead.
+> - When the MASTER deck is stopped and another deck is playing, beats follow
+>   the playing deck.
+>
 > Not sure which version you have, or is yours missing? See
 > [`tools/offset-finder`](tools/offset-finder/README.md): `python rbfind.py version` and `check`
 > test your setup, and `new` + `confirm` find offsets for a new release in about 10 minutes.
@@ -197,7 +204,7 @@ Sends the current tempo as an int on channel `start_channel` and a looping count
 Try the following if you run into issues. If you even after going through all these still are having problems, please [open an issue](https://github.com/grufkork/rkbx_link/issues/new) on GitHub.
 
 ### I get "Failed to read anlz file for deck #"
-This is a known issue mostly when loading tracks for the first time from streaming services. Eject and reload the track and it should be fine. The underlying cause is that the analysis file doesn't seem to yet properly exist when a non-analysed track is loaded for the first time. Should be fixable, and will probably be soon.
+This is a known issue mostly when loading tracks for the first time from streaming services. Eject and reload the track and it should be fine. (In this fork, tracks in your local collection are found by their UUID instead, see [`INTERNALS.md`](tools/offset-finder/INTERNALS.md). Streaming tracks are untested.) The underlying cause is that the analysis file doesn't seem to yet properly exist when a non-analysed track is loaded for the first time. Should be fixable, and will probably be soon.
 
 ### The program fails to connect to Rekordbox
 - Make sure you have selected the correct Rekordbox version in the config file.

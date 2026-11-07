@@ -1,8 +1,9 @@
 """Read/write rkbx_link's data/offsets format (mirrors src/offsets.rs).
 
 A version block is: version line, master deck index pointer, then per deck
-4 pointers (BPM, sample position, track info, ANLZ path). Blocks are ended by
-two blank lines; lines starting with '#' are ignored."""
+4 pointers (BPM, sample position, track info, ANLZ path), optionally followed
+by a "#uuid <chain>" line (this fork only: the loaded track's UUID). Blocks are
+ended by two blank lines; other lines starting with '#' are ignored."""
 import os
 import re
 
@@ -20,13 +21,23 @@ def load(path=OFFSETS):
         if not line:
             empty += 1
             if empty >= 2 and lines:
-                v, master, rest = lines[0], parse_chain(lines[1]), [parse_chain(x) for x in lines[2:]]
-                decks = [dict(zip(FIELDS, rest[i:i + 4])) for i in range(0, len(rest) - 3, 4)]
+                v, master = lines[0], parse_chain(lines[1])
+                decks, cur = [], []
+                for x in lines[2:]:
+                    if x.startswith("uuid "):
+                        decks[-1]["uuid"] = parse_chain(x[5:])
+                        continue
+                    cur.append(parse_chain(x))
+                    if len(cur) == 4:
+                        decks.append(dict(zip(FIELDS, cur)))
+                        cur = []
                 blocks[v] = {"master": master, "decks": decks}
                 lines = []
         else:
             empty = 0
-            if not line.startswith("#"):
+            if line.startswith("#uuid "):
+                lines.append(line[1:].strip())
+            elif not line.startswith("#"):
                 lines.append(line.strip())
     return blocks
 
@@ -64,7 +75,9 @@ def format_block(version, master, decks, comment=None):
         out += [f"# {line}" for line in comment.split("\n")]
     out += [version, fmt_chain(master), ""]
     for d in decks:
-        out += [fmt_chain(d[f]) for f in FIELDS] + [""]
+        out += [fmt_chain(d[f]) for f in FIELDS]
+        out += [f"#uuid {fmt_chain(d['uuid'])}"] if d.get("uuid") else []
+        out += [""]
     return "\n".join(out) + "\n\n"
 
 
