@@ -479,6 +479,14 @@ impl BeatKeeper {
                         }
                     }
 
+                    // Drop the old track's grid first. If the new one can't be read,
+                    // sending nothing beats sending pulses at the wrong tempo and phase.
+                    self.track_trackers[i].beatgrid = None;
+                    self.track_trackers[i].songstructure = None;
+                    if self.anlz_paths[i].value.is_empty() {
+                        continue; // deck empty, or the ANLZ chain doesn't point at this deck's track
+                    }
+
                     // TODO watch out here, there's probably loads of things that can go wrong
                     let Ok(bytes) = std::fs::read(&self.anlz_paths[i].value) else {
                         self.logger.err(&format!("Failed to read anlz file for deck {i}: {}", &self.anlz_paths[i].value));
@@ -638,7 +646,7 @@ impl TrackTracker {
 
         let time_now = (td.sample_position + offset_samples) as f32 / 44100.;
         let mut beat_idx: usize = 0;
-        if let Some(grid) = &self.beatgrid {
+        if let Some(grid) = self.beatgrid.as_ref().filter(|g| !g.beats.is_empty()) {
             for gridbeat in grid.beats.iter() {
                 if gridbeat.time as f32 / 1000. >= time_now {
                     break;
