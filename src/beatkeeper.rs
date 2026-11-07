@@ -187,8 +187,13 @@ impl<T: std::cmp::PartialEq> ChangeTrackedValue<T> {
     }
 }
 
+/// A deck counts as playing while its position has changed this recently.
+const PLAYING_HOLD: Duration = Duration::from_millis(300);
+
 pub struct BeatKeeper {
     masterdeck_index: ChangeTrackedValue<usize>,
+    last_positions: Vec<Option<i64>>,
+    last_moved: Vec<Option<std::time::Instant>>,
     offset_samples: i64,
     running_modules: Vec<Box<dyn OutputModule>>,
 
@@ -275,6 +280,8 @@ impl BeatKeeper {
 
         let mut keeper = BeatKeeper {
             masterdeck_index: ChangeTrackedValue::new(0),
+            last_positions: vec![None; 4],
+            last_moved: vec![None; 4],
             offset_samples: (keeper_config.get_or_default("delay_compensation", 0.) * 44100. / 1000.) as i64,
             track_infos: vec![ChangeTrackedValue::new(Default::default()); 4],
             running_modules,
@@ -341,9 +348,22 @@ impl BeatKeeper {
         slow_update: bool,
     ) -> Result<(), MemoryReadError> {
         // let masterdeck_index_changed = self.masterdeck_index.set(td.masterdeck_index as usize);
-        let masterdeck_index_changed = self.masterdeck_index.set(rb.read_masterdeck_index()?);
-        if self.masterdeck_index.value >= rb.deckcount {
+        let rb_master = rb.read_masterdeck_index()?;
+        if rb_master >= rb.deckcount {
             return Ok(()); // No master deck selected - rekordbox is not initialised
+        }
+        let master = self.choose_master(rb, rb_master);
+        let masterdeck_index_changed = self.masterdeck_index.set(master);
+        if masterdeck_index_changed {
+            if master == rb_master {
+                self.logger.info(&format!("Following master deck {}", master + 1));
+            } else {
+                self.logger.info(&format!(
+                    "Master deck {} is stopped, following playing deck {}",
+                    rb_master + 1,
+                    master + 1
+                ));
+            }
         }
 
         // let mut tracker_data = None;
@@ -588,6 +608,30 @@ impl BeatKeeper {
         }
 
         Ok(())
+    }
+
+    /// Rekordbox keeps MASTER on a deck after it stops, so follow a playing
+    /// deck instead while the master deck is stopped. When the master deck is
+    /// playing it always wins, so a deck that's only being cued in is ignored.
+    fn choose_master(&mut self, rb: &Rekordbox, rb_master: usize) -> usize {
+        let now = std::time::Instant::now();
+        for i in 0..rb.deckcount {
+            let Ok(td) = rb.read_timing_data(i) else { continue };
+            if self.last_positions[i].is_some_and(|p| p != td.sample_position) {
+                self.last_moved[i] = Some(now);
+            }
+            self.last_positions[i] = Some(td.sample_position);
+        }
+        let playing = |i: usize| self.last_moved[i].is_some_and(|t| now - t < PLAYING_HOLD);
+
+        let previous = self.masterdeck_index.value;
+        if playing(rb_master) {
+            rb_master
+        } else if previous < rb.deckcount && playing(previous) {
+            previous
+        } else {
+            (0..rb.deckcount).find(|&i| playing(i)).unwrap_or(rb_master)
+        }
     }
 
     fn report_error(&mut self, e: MemoryReadError) {
