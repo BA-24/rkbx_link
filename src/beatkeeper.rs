@@ -31,6 +31,7 @@ pub struct Rekordbox {
     sample_positions: Vec<Value<i64>>,
     track_infos: Vec<PointerChainValue<[u8; 200]>>,
     anlz_paths: Vec<PointerChainValue<[u8; 500]>>,
+    track_uuids: Vec<Option<PointerChainValue<[u8; 64]>>>,
     deckcount: usize,
     phraseparser: PhraseParser,
     mem: MemReader
@@ -44,6 +45,10 @@ impl Rekordbox {
         let sample_positions = mem.new_values(&offsets.sample_position[0..decks])?;
         let track_infos = mem.new_pointerchain_values(&offsets.track_info[0..decks]);
         let anlz_paths = mem.new_pointerchain_values(&offsets.anlz_path[0..decks]);
+        let track_uuids = offsets.track_uuid[0..decks]
+            .iter()
+            .map(|p| p.clone().map(|p| mem.new_pointerchain_value(p)))
+            .collect();
 
         let deckcount = current_bpms.len();
 
@@ -56,6 +61,7 @@ impl Rekordbox {
             deckcount,
             track_infos,
             anlz_paths,
+            track_uuids,
             phraseparser: PhraseParser::new(),
             mem
         })
@@ -106,10 +112,39 @@ impl Rekordbox {
                     .into_iter()
                     .take_while(|x| *x != 0x00)
                     .collect::<Vec<u8>>();
-                Ok(String::from_utf8(raw).unwrap_or_else(|_| "ERR".to_string()))
+                let path = String::from_utf8(raw).unwrap_or_else(|_| "ERR".to_string());
+                if path.is_empty() {
+                    return Ok(self.anlz_path_from_uuid(i).unwrap_or_default());
+                }
+                Ok(path)
             })
             .collect()
     }
+
+    /// Tracks that Rekordbox analyses while loading them never get an ANLZ path
+    /// on the deck, but the deck still knows the track's UUID, and the analysis
+    /// is stored under USBANLZ/<first 3 chars>/<rest>/. Returns None until the
+    /// file exists, so the path shows up (and is read) once analysis is done.
+    fn anlz_path_from_uuid(&self, deck: usize) -> Option<String> {
+        let raw = self.track_uuids.get(deck)?.as_ref()?.read(&self.mem).ok()?;
+        let uuid = String::from_utf8(raw.into_iter().take_while(|x| *x != 0).collect()).ok()?;
+        let valid = uuid.len() == 36
+            && uuid.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+        if !valid {
+            return None;
+        }
+        let path = format!("{}/PIONEER/USBANLZ/{}/{}/ANLZ0000.DAT", share_dir()?, &uuid[..3], &uuid[3..]);
+        std::path::Path::new(&path).exists().then_some(path)
+    }
+}
+
+/// Rekordbox's "share" folder, with forward slashes like the paths Rekordbox stores.
+fn share_dir() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    let dir = format!("{}/Pioneer/rekordbox/share", std::env::var("APPDATA").ok()?);
+    #[cfg(target_os = "macos")]
+    let dir = format!("{}/Library/Pioneer/rekordbox/share", std::env::var("HOME").ok()?);
+    Some(dir.replace('\\', "/"))
 }
 
 #[derive(Debug)]
